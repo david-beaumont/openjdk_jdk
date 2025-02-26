@@ -265,6 +265,14 @@ import java.util.Set;
  *       </ul>
  *   </td>
  * </tr>
+ * <tr>
+ *   <th scope="row">readOnly</th>
+ *   <td>{@link java.lang.String} or {@link java.lang.Boolean}</td>
+ *   <td>false</td>
+ *   <td>
+ *       If the value is {@code true}, the ZIP file system will be read-only.
+ *   </td>
+ * </tr>
  *  </tbody>
  * </table>
  *

@@ -81,12 +81,16 @@ class ZipFileSystem extends FileSystem {
     private static final boolean isWindows = System.getProperty("os.name")
                                              .startsWith("Windows");
     private static final byte[] ROOTPATH = new byte[] { '/' };
+
     private static final String PROPERTY_POSIX = "enablePosixFileAttributes";
     private static final String PROPERTY_DEFAULT_OWNER = "defaultOwner";
     private static final String PROPERTY_DEFAULT_GROUP = "defaultGroup";
     private static final String PROPERTY_DEFAULT_PERMISSIONS = "defaultPermissions";
     // Property used to specify the entry version to use for a multi-release JAR
     private static final String PROPERTY_RELEASE_VERSION = "releaseVersion";
+    // Force read-only filesystem even when the underlying ZIP/JAR is writable.
+    private static final String PROPERTY_READ_ONLY = "readOnly";
+
     // Original property used to specify the entry version to use for a
     // multi-release JAR which is kept for backwards compatibility.
     private static final String PROPERTY_MULTI_RELEASE = "multi-release";
@@ -104,7 +108,8 @@ class ZipFileSystem extends FileSystem {
     private final Path zfpath;
     final ZipCoder zc;
     private final ZipPath rootdir;
-    private boolean readOnly; // readonly file system, false by default
+    // Start readOnly (safe mode) and maybe reset at end of initialization.
+    private boolean readOnly = true;
 
     // default time stamp for pseudo entries
     private final long zfsDefaultTimeStamp = System.currentTimeMillis();
@@ -162,10 +167,7 @@ class ZipFileSystem extends FileSystem {
         }
         // sm and existence check
         zfpath.getFileSystem().provider().checkAccess(zfpath, AccessMode.READ);
-        boolean writeable = Files.isWritable(zfpath);
-        this.readOnly = !writeable;
         this.zc = ZipCoder.get(nameEncoding);
-        this.rootdir = new ZipPath(this, new byte[]{'/'});
         this.ch = Files.newByteChannel(zfpath, READ);
         try {
             this.cen = initCEN();
@@ -180,7 +182,23 @@ class ZipFileSystem extends FileSystem {
         this.provider = provider;
         this.zfpath = zfpath;
 
-        initializeReleaseVersion(env);
+        // Determining a release version uses this instance to reads paths etc.
+        // It requires 'entryLookup' and 'readOnly' to have safe defaults (which
+        // is why they are the only non-final fields).
+        Optional<Integer> multiReleaseVersion = determineReleaseVersion(env);
+
+        // Set the version-based lookup function for multi-release JARs.
+        this.entryLookup =
+                multiReleaseVersion.map(this::createVersionedLinks).orElse(Function.identity());
+
+        // We only allow read-write zip/jar files if they are not multi-release
+        // JARs and the underlying file is writable. Additionally, it's common for
+        // the "readOnly" environment value to be set for any JAR file.
+        this.readOnly =
+                isTrue(env, PROPERTY_READ_ONLY) || multiReleaseVersion.isPresent() || !Files.isWritable(zfpath);
+
+        // Pass "this" as a parameter after everything else is set up.
+        this.rootdir = new ZipPath(this, new byte[]{'/'});
     }
 
     /**
@@ -344,10 +362,6 @@ class ZipFileSystem extends FileSystem {
         if (readOnly) {
             throw new ReadOnlyFileSystemException();
         }
-    }
-
-    void setReadOnly() {
-        this.readOnly = true;
     }
 
     @Override
@@ -1383,33 +1397,33 @@ class ZipFileSystem extends FileSystem {
      * Checks if the Zip File System property "releaseVersion" has been specified. If it has,
      * use its value to determine the requested version. If not use the value of the "multi-release" property.
      */
-    private void initializeReleaseVersion(Map<String, ?> env) throws IOException {
+    private Optional<Integer> determineReleaseVersion(Map<String, ?> env) throws IOException {
         Object o = env.containsKey(PROPERTY_RELEASE_VERSION) ?
             env.get(PROPERTY_RELEASE_VERSION) :
             env.get(PROPERTY_MULTI_RELEASE);
 
-        if (o != null && isMultiReleaseJar()) {
-            int version;
-            if (o instanceof String) {
-                String s = (String)o;
-                if (s.equals("runtime")) {
-                    version = Runtime.version().feature();
-                } else if (s.matches("^[1-9][0-9]*$")) {
-                    version = Version.parse(s).feature();
-                } else {
-                    throw new IllegalArgumentException("Invalid runtime version");
-                }
-            } else if (o instanceof Integer) {
-                version = Version.parse(((Integer)o).toString()).feature();
-            } else if (o instanceof Version) {
-                version = ((Version)o).feature();
-            } else {
-                throw new IllegalArgumentException("env parameter must be String, " +
-                    "Integer, or Version");
-            }
-            createVersionedLinks(version < 0 ? 0 : version);
-            setReadOnly();
+        if (o == null || !isMultiReleaseJar()) {
+            return Optional.empty();
         }
+        int version;
+        if (o instanceof String) {
+            String s = (String) o;
+            if (s.equals("runtime")) {
+                version = Runtime.version().feature();
+            } else if (s.matches("^[1-9][0-9]*$")) {
+                version = Version.parse(s).feature();
+            } else {
+                throw new IllegalArgumentException("Invalid runtime version");
+            }
+        } else if (o instanceof Integer) {
+            version = Version.parse(((Integer) o).toString()).feature();
+        } else if (o instanceof Version) {
+            version = ((Version) o).feature();
+        } else {
+            throw new IllegalArgumentException("env parameter must be String, " +
+                    "Integer, or Version");
+        }
+        return Optional.of(Math.max(version, 0));
     }
 
     /**
@@ -1435,11 +1449,11 @@ class ZipFileSystem extends FileSystem {
      * Then wrap the map in a function that getEntry can use to override root
      * entry lookup for entries that have corresponding versioned entries.
      */
-    private void createVersionedLinks(int version) {
+    private Function<byte[], byte[]> createVersionedLinks(int version) {
         IndexNode verdir = getInode(getBytes("/META-INF/versions"));
         // nothing to do, if no /META-INF/versions
         if (verdir == null) {
-            return;
+            return Function.identity();
         }
         // otherwise, create a map and for each META-INF/versions/{n} directory
         // put all the leaf inodes, i.e. entries, into the alias map
@@ -1451,10 +1465,7 @@ class ZipFileSystem extends FileSystem {
                     getOrCreateInode(getRootName(entryNode, versionNode), entryNode.isdir),
                     entryNode.name))
         );
-        entryLookup = path -> {
-            byte[] entry = aliasMap.get(IndexNode.keyOf(path));
-            return entry == null ? path : entry;
-        };
+        return path -> aliasMap.getOrDefault(IndexNode.keyOf(path), path);
     }
 
     /**
