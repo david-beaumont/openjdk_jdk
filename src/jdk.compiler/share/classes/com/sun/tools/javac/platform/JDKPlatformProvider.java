@@ -61,6 +61,7 @@ import com.sun.source.util.Plugin;
 import com.sun.tools.javac.code.Source;
 import com.sun.tools.javac.code.Source.Feature;
 import com.sun.tools.javac.file.CacheFSInfo;
+import com.sun.tools.javac.file.FSInfo;
 import com.sun.tools.javac.file.JavacFileManager;
 import com.sun.tools.javac.jvm.Target;
 import com.sun.tools.javac.main.Option;
@@ -117,7 +118,7 @@ public class JDKPlatformProvider implements PlatformProvider {
         SUPPORTED_JAVA_PLATFORM_VERSIONS = new TreeSet<>(NUMERICAL_COMPARATOR);
         Path ctSymFile = findCtSym();
         if (Files.exists(ctSymFile)) {
-            try (FileSystem fs = FileSystems.newFileSystem(ctSymFile, (ClassLoader)null);
+            try (FileSystem fs = FileSystems.newFileSystem(ctSymFile, Map.of("readOnly", true));
                  DirectoryStream<Path> dir =
                          Files.newDirectoryStream(fs.getRootDirectories().iterator().next())) {
                 for (Path section : dir) {
@@ -249,7 +250,10 @@ public class JDKPlatformProvider implements PlatformProvider {
                 try {
                     FileSystem fs = ctSym2FileSystem.get(file);
                     if (fs == null) {
-                        ctSym2FileSystem.put(file, fs = FileSystems.newFileSystem(file, (ClassLoader)null));
+                        // This is expected to be a zip file system, and we always make these read-only.
+                        fs = FileSystems.newFileSystem(file, FSInfo.getReadOnlyJarEnv());
+                        assert fs.isReadOnly();
+                        ctSym2FileSystem.put(file, fs);
                     }
 
                     Path root = fs.getRootDirectories().iterator().next();

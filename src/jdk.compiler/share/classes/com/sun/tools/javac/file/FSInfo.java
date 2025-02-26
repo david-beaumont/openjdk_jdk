@@ -25,19 +25,17 @@
 
 package com.sun.tools.javac.file;
 
-import java.io.IOError;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.spi.FileSystemProvider;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.StringTokenizer;
 import java.util.jar.Attributes;
 import java.util.jar.JarFile;
@@ -163,4 +161,16 @@ public class FSInfo {
         return null;
     }
 
+    private static final String READ_ONLY_ZIPFS_KEY = "readOnly";
+    private static final Map<String, ?> READ_ONLY_ZIPFS_ENV = Map.of("readOnly", true);
+
+    public static Map<String, ?> getReadOnlyJarEnv(String releaseVersion) {
+        return releaseVersion == null
+                ? READ_ONLY_ZIPFS_ENV
+                : Map.of(READ_ONLY_ZIPFS_KEY, true, "releaseVersion", releaseVersion);
+    }
+
+    public static Map<String, ?> getReadOnlyJarEnv() {
+        return READ_ONLY_ZIPFS_ENV;
+    }
 }
