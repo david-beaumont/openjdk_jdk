@@ -381,7 +381,7 @@ public class Locations {
                         /* Not a recognized extension; open it to see if
                          it looks like a valid zip file. */
                         try {
-                            FileSystems.newFileSystem(file, Map.of("readOnly", true)).close();
+                            FileSystems.newFileSystem(file, FSInfo.getReadOnlyJarEnv()).close();
                             if (warn) {
                                 lint.logIfEnabled(LintWarnings.UnexpectedArchiveFile(file));
                             }
