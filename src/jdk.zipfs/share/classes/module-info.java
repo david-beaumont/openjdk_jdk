@@ -25,6 +25,7 @@
 
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileAttributeView;
 import java.nio.file.attribute.PosixFileAttributes;
@@ -265,7 +266,49 @@ import java.util.Set;
  *       </ul>
  *   </td>
  * </tr>
- *  </tbody>
+ * <tr>
+ *   <th scope="row">accessMode</th>
+ *   <td>{@link java.lang.String}</td>
+ *   <td>null/unset</td>
+ *   <td>
+ *       A value defining the desired access mode of the file system.
+ *       <ul>
+ *           <li>
+ *               If the value is {@code null} or the property is not set, the file
+ *               system will be created <em>read-write</em> if possible, and
+ *               <em>read-only</em> otherwise.<br>
+ *               Use {@link java.nio.file.FileSystem#isReadOnly() isReadOnly()} to
+ *               determine the actual access mode.
+ *           </li>
+ *           <li>
+ *               If the value is {@code "readOnly"}, the file system will be
+ *               <em>read-only</em>, and {@link java.nio.file.FileSystem#isReadOnly()
+ *               isReadOnly()} will always return {@code true}.<br>
+ *               A <em>read-only</em> file system must have a ZIP file to read, and
+ *               if no ZIP file exists, {@link NoSuchFileException} will be thrown
+ *               (the {@code "create"} property is ignored).
+ *           </li>
+ *           <li>
+ *               If the value is {@code "readWrite"}, the file system will be
+ *               <em>read-write</em>, and {@link java.nio.file.FileSystem#isReadOnly()
+ *               isReadOnly()} will always return {@code false}.<br>
+ *               If a writable file system cannot be created for an existing source ZIP
+ *               file, an {@link IllegalArgumentException} will be thrown.
+ *           </li>
+ *           <li>
+ *               Any other values will cause an {@link IllegalArgumentException} to be
+ *               thrown.
+ *           </li>
+ *       </ul>
+ *       Having a <em>read-write</em> file system says nothing about whether
+ *       individual files can be created or modified, simply that it might be possible.
+ *       <p>
+ *       Note also that when using Posix file permissions, the permissions of entries
+ *       in a <em>read-only</em> ZIP file system may still show the {@code WRITE} flag,
+ *       but these will not be writable using this file system instance.
+ *   </td>
+ * </tr>
+ * </tbody>
  * </table>
  *
  * <h2>Examples:</h2>

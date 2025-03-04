@@ -41,7 +41,15 @@ class Utils {
      * @return Path to the newly created JAR file
      */
     static Path createJarFile(String name, String... entries) throws IOException {
-        Path jarFile = Paths.get("basic.jar");
+        return createJarFile(Paths.get(name, entries));
+    }
+
+    /**
+     * Creates a JAR file of the given name with 0 or more named entries.
+     *
+     * @return Path to the newly created JAR file
+     */
+    static Path createJarFile(Path jarFile, String... entries) throws IOException {
         Random rand = new Random();
         try (OutputStream out = Files.newOutputStream(jarFile);
              JarOutputStream jout = new JarOutputStream(out)) {
