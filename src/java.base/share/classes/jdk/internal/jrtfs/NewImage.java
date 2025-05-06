@@ -254,11 +254,11 @@ public abstract class NewImage {
     }
 
     private static class DirectoryNode extends Node {
-        private final Memoized<List<Node>> children;
+        private final LazyChildList children;
 
         private DirectoryNode(JrtPath path, Supplier<List<Node>> childNodes) {
             super(path);
-            this.children = Memoized.of(() -> Collections.unmodifiableList(childNodes.get()));
+            this.children = LazyChildList.of(childNodes);
         }
 
         @Override
@@ -313,33 +313,46 @@ public abstract class NewImage {
         }
     }
 
-    private static class Memoized<T> implements Supplier<T> {
-        private volatile Supplier<T> source;
-        private volatile T value = null;
+    /// A lock-free, immutable, memoized child list for directory nodes.
+    ///
+    /// The only "racy" behaviour here is that the supplier may be called several
+    /// times, and thus cause `getChildren()` to return different `List` instances.
+    /// Since node identity is controlled by a `ConcurrentMap`, the child nodes in
+    /// the lists should be the same instances (but depending on the underlying
+    /// subclass implementation they might not be in the same order).
+    ///
+    /// Providing that subclass implementations only calculate the minimal set of
+    /// nodes required to satisfy the child list, there can never be a risk of
+    /// reentrant processing (due to the acyclic nature of a node hierarchy).
+    ///
+    /// Perhaps we should just sort them here?
+    private static class LazyChildList implements Supplier<List<Node>> {
+        private volatile Supplier<List<Node>> source;
+        private volatile List<Node> childList = null;
 
-        static <T> Memoized<T> of(Supplier<T> source) {
-            return new Memoized<>(source);
+        static LazyChildList of(Supplier<List<Node>> source) {
+            return new LazyChildList(source);
         }
 
-        private Memoized(Supplier<T> source) {
+        private LazyChildList(Supplier<List<Node>> source) {
             this.source = requireNonNull(source);
         }
 
         @Override
-        public T get() {
-            T value = this.value;
-            if (value == null) {
-                Supplier<T> source = this.source;
+        public List<Node> get() {
+            List<Node> list = this.childList;
+            if (list == null) {
+                Supplier<List<Node>> source = this.source;
                 if (source != null) {
-                    value = this.value = source.get();
+                    list = this.childList = Collections.unmodifiableList(source.get());
                     this.source = null;
                 } else {
                     // Race: If source is null, value must have been,
-                    // written so a non-null value can *now* be read.
-                    value = this.value;
+                    // written, so a non-null value can *now* be read.
+                    list = requireNonNull(this.childList);
                 }
             }
-            return value;
+            return list;
         }
     }
 }
