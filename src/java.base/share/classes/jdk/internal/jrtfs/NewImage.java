@@ -25,12 +25,12 @@
 package jdk.internal.jrtfs;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,18 +38,19 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import static java.util.Collections.emptyMap;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
-@SuppressWarnings({"EnhancedSwitchMigration", "SimplifyOptionalCallChains"})
+@SuppressWarnings({"SimplifyOptionalCallChains"})
 public abstract class NewImage {
 
     public static abstract class Node {
-        final JrtPath path;
+        final String path;
+        // No need for volatile since values are private and idempotent.
+        private String lazyCachedFileName = null;
 
-        private Node(JrtPath path) {
-            this.path = path;
+        private Node(String path) {
+            this.path = assertAbsolutePath(path);
         }
 
         public boolean isDirectory() {
@@ -61,15 +62,23 @@ public abstract class NewImage {
         }
 
         public List<Node> getChildren() {
-            throw new IllegalStateException("Not a directory: " + path);
+            throw new IllegalArgumentException("not a directory: " + path);
         }
 
-        public byte[] loadResource() {
-            throw new IllegalStateException("Not a resource: " + path);
+        public byte[] getContent() throws IOException {
+            throw new IllegalArgumentException("not a resource: " + path);
         }
 
-        public Node resolve() {
+        public Node resolveLink(boolean recursive) {
             return this;
+        }
+
+        private String getFileName() {
+            String name = lazyCachedFileName;
+            if (name == null) {
+                name = lazyCachedFileName = path.substring(path.lastIndexOf("/") + 1);
+            }
+            return name;
         }
 
         @Override
@@ -84,79 +93,104 @@ public abstract class NewImage {
 
         @Override
         public final String toString() {
-            return path.toString();
+            return path;
         }
     }
 
-    private static final JrtFileSystem JRTFS;
-    static {
-        try {
-            JRTFS = new JrtFileSystem(null, emptyMap());
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+    public interface ContentSupplier {
+        byte[] get() throws IOException;
     }
 
-    private static final JrtPath ROOT = JRTFS.getRootPath();
-    private static final JrtPath MODULES = JRTFS.getRootPath().resolve("modules");
-    private static final JrtPath PACKAGES = JRTFS.getRootPath().resolve("packages");
-    private static final Path MODULES_ROOT = MODULES.relativize(MODULES);
+    private static final Comparator<Node> CHILD_NODE_ORDER = Comparator.comparing(Node::getFileName);
+    private static final String ROOT = "";
 
-    // Only compare child nodes of the same parent, so comparison by file name is okay.
-    private static final Comparator<Node> CHILD_NODE_ORDER = Comparator.comparing(n -> n.path.getFileName());
+    // Enum names are important, DO NOT CHANGE THEM!
+    private enum TopLevelDir {
+        MODULES,
+        PACKAGES;
+
+        private final String absPrefix = assertAbsolutePath("/" + name().toLowerCase(Locale.ROOT));
+
+        static TopLevelDir identify(String path) {
+            return MODULES.isPrefixOf(path) ? MODULES
+                    : PACKAGES.isPrefixOf(path) ? PACKAGES
+                    : null;
+        }
+
+        String resolve(String relPath) {
+            return relPath.isEmpty() ? absPrefix : absPrefix + "/" + checkRelativePath(relPath);
+        }
+
+        String relativize(String absPath) {
+            if (!isPrefixOf(absPath)) {
+                throw new IllegalArgumentException("Bad path: '" + absPrefix + "' is not a prefix of '" + absPath + "'");
+            }
+            return absPath.length() == absPrefix.length() ? "" : absPath.substring(absPrefix.length() + 1);
+        }
+
+        private boolean isPrefixOf(String path) {
+            int len = absPrefix.length();
+            return path.startsWith(absPrefix) && (path.length() == len || path.charAt(len) == '/');
+        }
+
+        @Override
+        public String toString() {
+            return absPrefix;
+        }
+    }
 
     private final boolean isPreviewMode;
 
-    private final ConcurrentMap<JrtPath, Node> nodeCache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Node> nodeCache = new ConcurrentHashMap<>();
 
     protected NewImage(boolean isPreviewMode) {
         this.isPreviewMode = isPreviewMode;
     }
 
-    public Optional<Node> get(String path) {
-        return get(ROOT.resolve(path));
-    }
-
-    Optional<Node> get(JrtPath jrtPath) {
-        assert jrtPath.isAbsolute();
-
-        Node node = nodeCache.get(jrtPath);
+    public Optional<Node> get(String absPath) {
+        // Given path is permitted to be any string, so don't throw here.
+        if (!isAbsolutePath(absPath)) {
+            return Optional.empty();
+        }
+        Node node = nodeCache.get(absPath);
         if (node != null) {
             return Optional.of(node);
         }
-        if (ROOT.equals(jrtPath)) {
+        if (ROOT.equals(absPath)) {
             Node rootDir = newDirectory(ROOT, () -> Arrays.asList(
-                    newDirectory(MODULES, () -> getChildResourceNodes(MODULES_ROOT)),
-                    newDirectory(PACKAGES, this::getPackageRoots)));
+                    // ROOT here is the root of the resource hierarchy *under* /modules.
+                    newDirectory(TopLevelDir.MODULES.toString(), () -> getChildResourceNodes(ROOT)),
+                    newDirectory(TopLevelDir.PACKAGES.toString(), this::getPackageRoots)));
             return Optional.of(rootDir);
         }
         // "/modules" or "/packages"
-        if (jrtPath.startsWith(MODULES)) {
-            return getModulesNode(jrtPath);
-        } else if (jrtPath.startsWith(PACKAGES)) {
-            return getPackagesNode(jrtPath);
+        TopLevelDir dir = TopLevelDir.identify(absPath);
+        if (dir == TopLevelDir.MODULES) {
+            return getModulesNode(absPath);
+        } else if (dir == TopLevelDir.PACKAGES) {
+            return getPackagesNode(absPath);
         } else {
             return Optional.empty();
         }
     }
 
-    protected abstract Optional<Node> getResource(Path resourcePath, boolean preview);
+    protected abstract Optional<Node> getResource(String resourcePath, boolean preview);
 
-    protected abstract void forEachChildOf(Path resourcePath, boolean preview, Consumer<Node> action);
+    protected abstract void forEachChildOf(String resourcePath, boolean preview, Consumer<Node> action);
 
     protected abstract Set<String> getAllModuleNames();
 
     protected abstract Set<String> getAllPackageNames();
 
-    protected Node newResource(Path resourcePath, Supplier<byte[]> contents) {
-        return newFile(MODULES.resolve(resourcePath), contents);
+    protected Node newResource(String resourcePath, ContentSupplier contents) {
+        return newFile(TopLevelDir.MODULES.resolve(resourcePath), contents);
     }
 
-    protected Node newResourceDirectory(Path resourcePath) {
-        return newDirectory(MODULES.resolve(resourcePath), () -> getChildResourceNodes(resourcePath));
+    protected Node newResourceDirectory(String resourcePath) {
+        return newDirectory(TopLevelDir.MODULES.resolve(resourcePath), () -> getChildResourceNodes(resourcePath));
     }
 
-    private List<Node> getChildResourceNodes(Path resourcePath) {
+    private List<Node> getChildResourceNodes(String resourcePath) {
         ArrayList<Node> nodes = new ArrayList<>();
         // Populate preview first since creating new nodes adds them to the cache.
         if (isPreviewMode) {
@@ -174,12 +208,11 @@ public abstract class NewImage {
                 }
             });
         }
-        nodes.sort(CHILD_NODE_ORDER);
         return nodes;
     }
 
-    private Optional<Node> getModulesNode(JrtPath path) {
-        Path resourcePath = MODULES.relativize(path);
+    private Optional<Node> getModulesNode(String absModulePath) {
+        String resourcePath = TopLevelDir.MODULES.relativize(absModulePath);
         Optional<Node> value = Optional.empty();
         // Check preview first since creating new nodes adds them to the cache.
         if (isPreviewMode) {
@@ -192,27 +225,35 @@ public abstract class NewImage {
     }
 
     // Returns an individually specified node in the /packages hierarchy.
-    private Optional<Node> getPackagesNode(JrtPath path) {
-        // /packages/<java.package.name>[/<module.name>]
-        switch (path.getNameCount()) {
-            case 1:
-                // /packages
-                return Optional.of(newDirectory(PACKAGES, this::getPackageRoots));
-            case 2:
-                // /packages/<java.package.name>
-                return getPackageDirectory(path);
-            case 3:
-                // /packages/<java.package.name>/<module.name>
-                return getPackageLink(path);
-            default:
-                return Optional.empty();
+    private Optional<Node> getPackagesNode(String absPackagePath) {
+        // /packages[/<java.package.name>[/<module.name>]]
+        int pkgStart = absPackagePath.indexOf('/', 1) + 1;
+        if (pkgStart == 0) {
+            // /packages
+            return Optional.of(newDirectory(TopLevelDir.PACKAGES.toString(), this::getPackageRoots));
         }
+        String packageName = absPackagePath.substring(pkgStart);
+        int sepIdx = packageName.indexOf('/');
+        if (sepIdx == -1) {
+            if (isValidPackageOrModuleName(packageName)) {
+                // /packages/<java.package.name>
+                return getPackageDirectory(packageName);
+            }
+        } else {
+            String moduleName = packageName.substring(sepIdx + 1);
+            packageName = packageName.substring(0, sepIdx);
+            if (isValidPackageOrModuleName(moduleName) && isValidPackageOrModuleName(packageName)) {
+                // /packages/<java.package.name>/<module.name>
+                return getPackageLink(packageName, moduleName);
+            }
+        }
+        return Optional.empty();
     }
 
     // Returns the child nodes of the /packages directory.
     private List<Node> getPackageRoots() {
+        // WARNING: Currently we *assume* the subclass will give us valid package names!
         return getAllPackageNames().stream()
-                .map(PACKAGES::resolve)
                 .map(this::getPackageDirectory)
                 .filter(Optional::isPresent)
                 .map(Optional::get)
@@ -220,43 +261,46 @@ public abstract class NewImage {
     }
 
     // /packages/<java.package.name>
-    private Optional<Node> getPackageDirectory(JrtPath jrtPath) {
-        boolean packageExists = getAllModuleNames().stream()
-                .anyMatch(name -> getPackageLink(jrtPath.resolve(name)).isPresent());
-        return packageExists
-                ? Optional.of(newDirectory(jrtPath, () -> getPackageChildLinks(jrtPath)))
-                : Optional.empty();
+    private Optional<Node> getPackageDirectory(String packageName) {
+        // WARNING: Currently we *assume* the subclass will give us valid module names!
+        if (getAllModuleNames().stream()
+                .anyMatch(moduleName -> getPackageLink(packageName, moduleName).isPresent())) {
+            String absPath = TopLevelDir.PACKAGES.resolve(packageName);
+            return Optional.of(newDirectory(absPath, () -> getPackageChildLinks(packageName)));
+        }
+        return Optional.empty();
     }
 
     // /packages/<java.package.name>/<module.name>
-    private List<Node> getPackageChildLinks(JrtPath jrtPath) {
+    private List<Node> getPackageChildLinks(String packageName) {
         return getAllModuleNames().stream()
-                .map(name -> getPackageLink(PACKAGES.resolve(name)))
+                .map(moduleName -> getPackageLink(packageName, moduleName))
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .collect(toList());
     }
 
     // /packages/<java.package.name>/<module.name>
-    private Optional<Node> getPackageLink(JrtPath jrtPath) {
-        String packageName = jrtPath.getName(1).toString();
-        String moduleName = jrtPath.getName(2).toString();
-        return get(MODULES.resolve(moduleName).resolve(packageName.replace('.', '/')))
-                .filter(Node::isDirectory)
-                // Sub-paths are always relative even if they come from an absolute path.
-                // There is nothing like "trimToLength(2)" or similar.
-                .map(t -> get(t.path.subpath(0, 2).toAbsolutePath()).get())
-                .map(t -> newLink(jrtPath, t));
+    private Optional<Node> getPackageLink(String packageName, String moduleName) {
+        String absModulePath = TopLevelDir.MODULES.resolve(moduleName);
+        // Test for implied package directory "/modules/module.name/java/package/name"
+        if (get(absModulePath + "/" + packageName.replace('.', '/')).map(Node::isDirectory).orElse(false)) {
+            // Since the target is a parent of the package directory, it MUST exist.
+            Node targetDir = get(absModulePath).get();
+            String absLinkPath = TopLevelDir.PACKAGES.resolve(packageName + "/" + moduleName);
+            return Optional.of(newLink(absLinkPath, targetDir));
+        }
+        return Optional.empty();
     }
 
-    private Node newDirectory(JrtPath path, Supplier<List<Node>> getChildren) {
-        return nodeCache.computeIfAbsent(path, p -> new DirectoryNode(p, getChildren));
+    private Node newDirectory(String absPath, Supplier<List<Node>> getChildren) {
+        return nodeCache.computeIfAbsent(absPath, p -> new DirectoryNode(p, getChildren));
     }
 
     private static class DirectoryNode extends Node {
         private final LazyChildList children;
 
-        private DirectoryNode(JrtPath path, Supplier<List<Node>> childNodes) {
+        private DirectoryNode(String path, Supplier<List<Node>> childNodes) {
             super(path);
             this.children = LazyChildList.of(childNodes);
         }
@@ -272,32 +316,32 @@ public abstract class NewImage {
         }
     }
 
-    private Node newFile(JrtPath path, Supplier<byte[]> contents) {
+    private Node newFile(String path, ContentSupplier contents) {
         return nodeCache.computeIfAbsent(path, p -> new FileNode(p, contents));
     }
 
     private static class FileNode extends Node {
-        private final Supplier<byte[]> contents;
+        private final ContentSupplier contents;
 
-        private FileNode(JrtPath path, Supplier<byte[]> contents) {
+        private FileNode(String path, ContentSupplier contents) {
             super(path);
             this.contents = requireNonNull(contents);
         }
 
         @Override
-        public byte[] loadResource() {
+        public byte[] getContent() throws IOException {
             return this.contents.get();
         }
     }
 
-    private Node newLink(JrtPath path, Node target) {
+    private Node newLink(String path, Node target) {
         return nodeCache.computeIfAbsent(path, p -> new LinkNode(p, target));
     }
 
     private static class LinkNode extends Node {
         private final Node target;
 
-        private LinkNode(JrtPath path, Node target) {
+        private LinkNode(String path, Node target) {
             super(path);
             this.target = requireNonNull(target);
         }
@@ -308,9 +352,70 @@ public abstract class NewImage {
         }
 
         @Override
-        public Node resolve() {
-            return target;
+        public Node resolveLink(boolean recursive) {
+            return recursive ? target.resolveLink(true) : target;
         }
+    }
+
+    // WARNING: This needs to be properly updated according to the spec.
+    // Visible for whitebox testing.
+    static boolean isValidPackageOrModuleName(String name) {
+        return !name.isEmpty()
+                && !name.startsWith(".")
+                && !name.endsWith(".")
+                && !name.contains("..")
+                && !name.contains("/");
+    }
+
+    // WARNING: This needs to be properly updated according to the spec.
+    // Visible for whitebox testing.
+    static boolean isValidPath(String path, boolean isAbsolute) {
+        if (path.isEmpty()) {
+            // Empty is NOT a valid relative path, so we can always do (abs + "/" + rel).
+            return isAbsolute;
+        }
+        if (isAbsolute && path.charAt(0) != '/') {
+            return false;
+        }
+        // Start index for new segment, prohibit . at start of segment.
+        int startIdx = isAbsolute ? 1 : 0;
+        boolean allowSlash = false;
+        boolean allowDot = false;
+        for (int i = startIdx; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c == '/') {
+                if (!allowSlash) return false;
+                // Same setup as at start (start of new segment).
+                allowSlash = false;
+                allowDot = false;
+                continue;
+            } else if (c == '.') {
+                if (!allowDot) return false;
+                // Unlike above, allow "./" for trailing dots in names.
+                allowDot = false;
+                continue;
+            }
+            allowSlash = true;
+            allowDot = true;
+        }
+        return allowSlash;
+    }
+
+    // For places where the data should definitely already be correct.
+    private static String assertAbsolutePath(String path) {
+        assert isValidPath(path, true) : "Invalid absolute path: " + path;
+        return path;
+    }
+
+    private static boolean isAbsolutePath(String path) {
+        return isValidPath(path, true);
+    }
+
+    private static String checkRelativePath(String path) {
+        if (isValidPath(path, false)) {
+            return path;
+        }
+        throw new IllegalArgumentException("Invalid relative path: " + path);
     }
 
     /// A lock-free, immutable, memoized child list for directory nodes.
@@ -318,14 +423,11 @@ public abstract class NewImage {
     /// The only "racy" behaviour here is that the supplier may be called several
     /// times, and thus cause `getChildren()` to return different `List` instances.
     /// Since node identity is controlled by a `ConcurrentMap`, the child nodes in
-    /// the lists should be the same instances (but depending on the underlying
-    /// subclass implementation they might not be in the same order).
+    /// the lists should be the same instances and in the same order.
     ///
     /// Providing that subclass implementations only calculate the minimal set of
     /// nodes required to satisfy the child list, there can never be a risk of
     /// reentrant processing (due to the acyclic nature of a node hierarchy).
-    ///
-    /// Perhaps we should just sort them here?
     private static class LazyChildList implements Supplier<List<Node>> {
         private volatile Supplier<List<Node>> source;
         private volatile List<Node> childList = null;
@@ -335,7 +437,12 @@ public abstract class NewImage {
         }
 
         private LazyChildList(Supplier<List<Node>> source) {
-            this.source = requireNonNull(source);
+            requireNonNull(source);
+            this.source = () -> {
+                List<Node> children = source.get();
+                children.sort(CHILD_NODE_ORDER);
+                return Collections.unmodifiableList(children);
+            };
         }
 
         @Override
@@ -344,7 +451,7 @@ public abstract class NewImage {
             if (list == null) {
                 Supplier<List<Node>> source = this.source;
                 if (source != null) {
-                    list = this.childList = Collections.unmodifiableList(source.get());
+                    list = this.childList = source.get();
                     this.source = null;
                 } else {
                     // Race: If source is null, value must have been,

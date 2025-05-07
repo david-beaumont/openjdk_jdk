@@ -27,10 +27,11 @@ import jdk.internal.jrtfs.NewImage;
 import jdk.internal.jrtfs.NewImage.Node;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Path;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -75,7 +76,7 @@ public class NewImageTest {
         image.assertNotLogged("/modules/mod.two/java");
         // Package links resolve to the linked node.
         Node modTwo = image.assertNode("/modules/mod.two");
-        assertEquals(modTwo, modLink.resolve());
+        assertEquals(modTwo, modLink.resolveLink(false));
 
         // The root /modules directory is created only when requested.
         Node modOne = image.assertFirstLookup("/modules/mod.one");
@@ -199,12 +200,70 @@ public class NewImageTest {
         assertEquals(asList(pkgJava, pkgBar, pkgFoo), packages.getChildren());
     }
 
+    @Test
+    public void testBadPaths() {
+        Set<String> files = Set.of(
+                "mod.name/java/foo/First",
+                "mod.name/java/foo/Second");
+        TestImage image = new TestImage(false, files, Set.of());
+
+        // Test good paths first to prove something is working!
+        List<String> goodPaths = asList(
+                "",
+                "/modules",
+                "/modules/mod.name",
+                "/modules/mod.name/java",
+                "/modules/mod.name/java/foo",
+                "/modules/mod.name/java/foo/First",
+                "/packages",
+                "/packages/java.foo",
+                "/packages/java.foo/mod.name");
+        for (String path : goodPaths) {
+            assertTrue(image.get(path).isPresent(), "Good path should be present: " + path);
+        }
+
+        // None of these should result in an exception (users are allowed to ask for anything).
+        List<String> badPaths = asList(
+                // Always invalid paths.
+                ".", "..", "//",
+                // Bad /modules paths.
+                "/modules/",
+                "/modules/.",
+                "/modules//",
+                "/modules/mod..name",
+                "/modules/.mod.name",
+                "/modules/mod.name.",
+                // Missing /modules paths.
+                "/modules/not.here",
+                "/modules/mod.name/java/not/here",
+                // Bad /packages paths.
+                "/packages/",
+                "/packages/.",
+                "/packages//",
+                "/packages/java..foo",
+                "/packages/.java.foo",
+                "/packages/java.foo.",
+                // Missing /packages paths.
+                "/packages/not.here",
+                "/packages/java.foo/missing.link",
+                // Extended non-directory paths.
+                "/modules/mod.name/java/foo/First/xxx",
+                "/packages/java.foo/mod.name/xxx");
+        for (String path : badPaths) {
+            assertFalse(image.get(path).isPresent(), "Bad path should not be present: " + path);
+        }
+    }
+
     // ---- Static test helper methods ----
 
     static void assertContent(String expected, Node node) {
         assertFalse(node.isDirectory());
         assertFalse(node.isLink());
-        assertEquals(expected, new String(node.loadResource(), UTF_8), "Unexpected node content");
+        try {
+            assertEquals(expected, new String(node.getContent(), UTF_8), "Unexpected node content");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     // ---- Fake image implementation ----
@@ -334,7 +393,7 @@ public class NewImageTest {
         // Create a new resource node (in the "/modules" hierarchy) and log it.
         // Since this is the only place where callbacks to create/cache nodes are
         // made, we can be sure we log new nodes exactly when they are created.
-        private Node logNewResource(Path path, boolean isDir, boolean isPreview) {
+        private Node logNewResource(String path, boolean isDir, boolean isPreview) {
             Node newNode = isDir
                     ? newResourceDirectory(path)
                     : newResource(path, () -> (path + (isPreview ? "*" : "")).getBytes(UTF_8));
@@ -343,24 +402,25 @@ public class NewImageTest {
         }
 
         @Override
-        protected Optional<Node> getResource(Path resourcePath, boolean preview) {
-            String pathString = resourcePath.toString();
-            if (pathString.isEmpty()) {
+        protected Optional<Node> getResource(String resourcePath, boolean preview) {
+            if (resourcePath.isEmpty()) {
                 // "Root" directory always exists for path "".
                 return Optional.of(logNewResource(resourcePath, true, preview));
             }
-            Boolean isDir = (preview ? previewMap : fileMap).get(pathString);
+            Boolean isDir = (preview ? previewMap : fileMap).get(resourcePath);
             return isDir != null
                     ? Optional.of(logNewResource(resourcePath, isDir, preview))
                     : Optional.empty();
         }
 
         @Override
-        protected void forEachChildOf(Path resourcePath, boolean preview, Consumer<Node> action) {
-            forEachChild(resourcePath.toString(), preview, (name, isDir) -> {
-                Path p = resourcePath.resolve(name);
-                action.accept(logNewResource(p, isDir, preview));
-            });
+        protected void forEachChildOf(String dirPath, boolean preview, Consumer<Node> action) {
+            // Resource root directory prefix is just "", not "/".
+            String dirPrefix = dirPath.isEmpty() ? dirPath : (dirPath + "/");
+            forEachChild(
+                    dirPrefix,
+                    preview,
+                    (name, isDir) -> action.accept(logNewResource(dirPrefix + name, isDir, preview)));
         }
 
         @Override
@@ -373,16 +433,15 @@ public class NewImageTest {
             return allPackageNames;
         }
 
-        // Process an action for each immediate child of the given directory path,
+        // Process an action for each immediate child of the given directory prefix,
         // passing the child node's local "file name" and whether it is a directory.
-        private void forEachChild(String dirStr, boolean preview, BiConsumer<String, Boolean> action) {
-            // Root directory prefix is just "", not "/".
-            String dirPrefix = dirStr.isEmpty() ? dirStr : dirStr + "/";
+        private void forEachChild(String dirPrefix, boolean preview, BiConsumer<String, Boolean> action) {
+            int prefixLen = dirPrefix.length();
             Map<String, Boolean> map = preview ? previewMap : fileMap;
             for (var e : map.entrySet()) {
                 String p = e.getKey();
-                if (p.startsWith(dirPrefix) && p.indexOf('/', dirPrefix.length() + 1) == -1) {
-                    action.accept(p.substring(dirPrefix.length()), e.getValue());
+                if (p.length() > prefixLen && p.startsWith(dirPrefix) && p.indexOf('/', prefixLen) == -1) {
+                    action.accept(p.substring(prefixLen), e.getValue());
                 }
             }
         }
