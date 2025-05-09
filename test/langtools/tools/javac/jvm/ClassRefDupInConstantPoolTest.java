@@ -35,9 +35,19 @@ import java.lang.classfile.*;
 import java.lang.classfile.constantpool.*;
 
 public class ClassRefDupInConstantPoolTest {
+
+    private static final String DUPLICATE_REFS_CLASS =
+            """
+            class Duplicates {
+                String concat(String s1, String s2) {
+                    return s1 + (s2 == s1 ? " " : s2);
+                }
+            }""";
+
     public static void main(String[] args) throws Exception {
-        ClassModel cls = ClassFile.of().parse(ClassRefDupInConstantPoolTest.class.
-                                       getResourceAsStream("ClassRefDupInConstantPoolTest$Duplicates.class").readAllBytes());
+        new JavacTask(new ToolBox()).sources(DUPLICATE_REFS_CLASS).run();
+
+        ClassModel cls = ClassFile.of().parse(Files.readAllBytes(Path.of("Duplicates.class")));
         ConstantPool pool = cls.constantPool();
 
         int duplicates = 0;

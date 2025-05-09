@@ -137,12 +137,13 @@ public class ClassPathWithDoubleQuotesTest extends TestRunner {
         // testing scenario 3
         System.err.println("invoking javac EXEC mode with double quotes in the CLASSPATH env variable");
         List<String> log2 = new JavacTask(tb, Task.Mode.EXEC)
-                    .envVar("CLASSPATH", "\"test/jarOut/J.jar" + File.pathSeparator + "test/src\"")
-                    .options("-Xlint:path", "-XDrawDiagnostics", "-J-Duser.language=en", "-J-Duser.country=US")
-                    .files("test/src/A.java").run(Task.Expect.FAIL)
-                    .writeAll()
-                    .getOutputLines(Task.OutputKind.STDERR);
-        log2 = log2.stream().filter(s->!s.matches("^Picked up .*JAVA.*OPTIONS:.*")).collect(Collectors.toList());
+                .envVar("CLASSPATH", "\"test/jarOut/J.jar" + File.pathSeparator + "test/src\"")
+                .options("-Xlint:path", "-XDrawDiagnostics", "-J-Duser.language=en", "-J-Duser.country=US", "-implicit:none")
+                .files("test/src/A.java")
+                .run(Task.Expect.FAIL)
+                .writeAll()
+                .getOutputLines(Task.OutputKind.STDERR);
+        log2 = log2.stream().filter(s -> !s.matches("^Picked up .*JAVA.*OPTIONS:.*")).collect(Collectors.toList());
         Assert.check(log2.equals(expectedFailureOutput2A) || log2.equals(expectedFailureOutput2B),
                 "unexpected output");
     }
