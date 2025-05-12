@@ -79,15 +79,15 @@ import static jdk.nio.zipfs.ZipUtils.*;
 class ZipFileSystem extends FileSystem {
     // statics
     private static final boolean isWindows = System.getProperty("os.name")
-            .startsWith("Windows");
-    private static final byte[] ROOTPATH = new byte[]{'/'};
+                                             .startsWith("Windows");
+    private static final byte[] ROOTPATH = new byte[] { '/' };
 
     // Global access mode for "mounted" file system ("readOnly" or "readWrite").
     private static final String PROPERTY_ACCESS_MODE = "accessMode";
 
     // Posix file permissions allow per-file access control in a posix-like fashion.
-    // Note that using a "readOnly" access mode will force all files, and the
-    // default permission, to lose any "write" permissions.
+    // Using a "readOnly" access mode will change the posix permissions of any
+    // underlying entries (they may still show as "writable", but will not be).
     private static final String PROPERTY_POSIX = "enablePosixFileAttributes";
     private static final String PROPERTY_DEFAULT_OWNER = "defaultOwner";
     private static final String PROPERTY_DEFAULT_GROUP = "defaultGroup";
