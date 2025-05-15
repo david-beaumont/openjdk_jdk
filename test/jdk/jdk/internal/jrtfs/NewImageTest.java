@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,7 +25,10 @@
 
 import jdk.internal.jrtfs.NewImage;
 import jdk.internal.jrtfs.NewImage.Node;
+import jdk.internal.jrtfs.NewImage.NodeFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -38,8 +41,10 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static java.lang.Boolean.TRUE;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,51 +59,53 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * @run junit/othervm NewImageTest
  */
 public class NewImageTest {
+
     @Test
-    public void testBasicLazyNodeCreation() {
-        Set<String> files = Set.of(
-                "mod.one/java/foo/Foo.class",
-                "mod.two/java/bar/Bar.class");
-        TestImage image = new TestImage(false, files, Set.of());
+    public void basicLazyNodeCreation() {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.one/java/foo/Foo.class",
+                        "mod.two/java/bar/Bar.class"),
+                Set.of());
+        NewImage image = new NewImage(provider, false);
 
         // Normal file lookup does not create the containing directory.
-        Node node = image.assertFirstLookup("/modules/mod.one/java/foo/Foo.class");
+        Node node = provider.assertFirstLookup(image, "/modules/mod.one/java/foo/Foo.class");
+
         assertFalse(node.isDirectory(), "Node: " + node);
         assertContent("mod.one/java/foo/Foo.class", node);
-        image.assertNotLogged("/modules/mod.one/java/foo");
+        provider.assertNotLogged("/modules/mod.one/java/foo");
 
         // Normal directory lookup does not create child nodes.
-        image.assertNotLogged("/modules/mod.two");
-        Node modLink = image.assertNode("/packages/java.bar/mod.two");
-        // Making a package link creates the linked directory ...
-        image.assertLogged("/modules/mod.two");
-        // ... but nothing inside it.
-        image.assertNotLogged("/modules/mod.two/java");
+        provider.assertNotLogged("/modules/mod.two");
+        Node modLink = assertNode(image, "/packages/java.bar/mod.two");
+        // Making a package link does NOT create the linked directory
+        Node modTwo = provider.assertFirstLookup(image, "/modules/mod.two");
         // Package links resolve to the linked node.
-        Node modTwo = image.assertNode("/modules/mod.two");
         assertEquals(modTwo, modLink.resolveLink(false));
 
         // The root /modules directory is created only when requested.
-        Node modOne = image.assertFirstLookup("/modules/mod.one");
-        Node modRoot = image.assertFirstLookup("/modules");
+        Node modOne = provider.assertFirstLookup(image, "/modules/mod.one");
+        Node modRoot = provider.assertFirstLookup(image, "/modules");
         assertEquals(asList(modOne, modTwo), modRoot.getChildren());
     }
 
     @Test
-    public void testPreviewFileReplace() {
-        Set<String> files = Set.of(
-                "mod.name/java/foo/First",
-                "mod.name/java/foo/Second",
-                "mod.name/java/foo/Third");
-        Set<String> preview = Set.of(
-                "mod.name/java/foo/Second");
-        TestImage image = new TestImage(true, files, preview);
+    public void previewFileReplace() {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.name/java/foo/First",
+                        "mod.name/java/foo/Second",
+                        "mod.name/java/foo/Third"),
+                Set.of(
+                        "mod.name/java/foo/Second"));
+        NewImage image = new NewImage(provider, true);
 
         // There are 3 files in the directory.
-        Node first = image.assertFirstLookup("/modules/mod.name/java/foo/First");
-        Node second = image.assertFirstLookup("/modules/mod.name/java/foo/Second");
-        Node third = image.assertFirstLookup("/modules/mod.name/java/foo/Third");
-        Node dir = image.assertFirstLookup("/modules/mod.name/java/foo");
+        Node first = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/First");
+        Node second = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/Second");
+        Node third = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/Third");
+        Node dir = provider.assertFirstLookup(image, "/modules/mod.name/java/foo");
         assertTrue(dir.isDirectory());
         assertEquals(asList(first, second, third), dir.getChildren());
 
@@ -108,27 +115,28 @@ public class NewImageTest {
         assertContent("mod.name/java/foo/Third", third);
 
         // This node exists without replaced content in no-preview image.
-        TestImage noPreview = new TestImage(false, files, preview);
+        NewImage noPreview = new NewImage(provider, false);
         assertContent("mod.name/java/foo/Second",
-                noPreview.assertNode("/modules/mod.name/java/foo/Second"));
+                assertNode(noPreview, "/modules/mod.name/java/foo/Second"));
     }
 
     @Test
-    public void testPreviewFileAddition() {
-        Set<String> files = Set.of(
-                "mod.name/java/foo/First",
-                "mod.name/java/foo/Third");
-        Set<String> preview = Set.of(
-                "mod.name/java/foo/Second",
-                "mod.name/java/foo/Xtra");
-        TestImage image = new TestImage(true, files, preview);
+    public void previewFileAddition() {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.name/java/foo/First",
+                        "mod.name/java/foo/Third"),
+                Set.of(
+                        "mod.name/java/foo/Second",
+                        "mod.name/java/foo/Xtra"));
+        NewImage image = new NewImage(provider, true);
 
         // There are 4 files in the directory.
-        Node first = image.assertFirstLookup("/modules/mod.name/java/foo/First");
-        Node second = image.assertFirstLookup("/modules/mod.name/java/foo/Second");
-        Node third = image.assertFirstLookup("/modules/mod.name/java/foo/Third");
-        Node last = image.assertFirstLookup("/modules/mod.name/java/foo/Xtra");
-        Node dir = image.assertFirstLookup("/modules/mod.name/java/foo");
+        Node first = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/First");
+        Node second = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/Second");
+        Node third = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/Third");
+        Node last = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/Xtra");
+        Node dir = provider.assertFirstLookup(image, "/modules/mod.name/java/foo");
         assertTrue(dir.isDirectory());
         assertEquals(asList(first, second, third, last), dir.getChildren());
 
@@ -139,122 +147,160 @@ public class NewImageTest {
         assertContent("mod.name/java/foo/Xtra*", last);
 
         // The preview nodes are missing in the non-preview image.
-        TestImage noPreview = new TestImage(false, files, preview);
-        assertTrue(noPreview.get("/modules/mod.name/java/foo/First").isPresent());
-        assertFalse(noPreview.get("/modules/mod.name/java/foo/Second").isPresent());
-        assertTrue(noPreview.get("/modules/mod.name/java/foo/Third").isPresent());
-        assertFalse(noPreview.get("/modules/mod.name/java/foo/Xtra").isPresent());
+        NewImage noPreview = new NewImage(provider, false);
+        assertTrue(noPreview.findNode("/modules/mod.name/java/foo/First").isPresent());
+        assertFalse(noPreview.findNode("/modules/mod.name/java/foo/Second").isPresent());
+        assertTrue(noPreview.findNode("/modules/mod.name/java/foo/Third").isPresent());
+        assertFalse(noPreview.findNode("/modules/mod.name/java/foo/Xtra").isPresent());
     }
 
     @Test
-    public void testPreviewDirectoryAddition() {
-        Set<String> files = Set.of(
-                "mod.name/java/foo/First",
-                "mod.name/java/foo/Second");
-        Set<String> preview = Set.of(
-                "mod.name/java/foo/bar/SubDirFile",
-                "mod.name/java/gus/OtherDirFile");
-        TestImage image = new TestImage(true, files, preview);
+    public void previewDirectoryAddition() {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.name/java/foo/First",
+                        "mod.name/java/foo/Second"),
+                Set.of(
+                        "mod.name/java/foo/bar/SubDirFile",
+                        "mod.name/java/gus/OtherDirFile"));
+        NewImage image = new NewImage(provider, true);
 
         // A new directory was added from the preview set.
-        Node first = image.assertFirstLookup("/modules/mod.name/java/foo/First");
-        Node second = image.assertFirstLookup("/modules/mod.name/java/foo/Second");
-        Node subDir = image.assertFirstLookup("/modules/mod.name/java/foo/bar");
+        Node first = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/First");
+        Node second = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/Second");
+        Node subDir = provider.assertFirstLookup(image, "/modules/mod.name/java/foo/bar");
         assertTrue(subDir.isDirectory());
-        Node dir = image.assertFirstLookup("/modules/mod.name/java/foo");
+        Node dir = provider.assertFirstLookup(image, "/modules/mod.name/java/foo");
         assertEquals(asList(first, second, subDir), dir.getChildren());
 
         // Preview files may create entirely new directories.
-        image.assertFirstLookup("/modules/mod.name/java/foo/bar/SubDirFile");
-        image.assertFirstLookup("/modules/mod.name/java/gus/OtherDirFile");
+        provider.assertFirstLookup(image, "/modules/mod.name/java/foo/bar/SubDirFile");
+        provider.assertFirstLookup(image, "/modules/mod.name/java/gus/OtherDirFile");
         // And new packages inferred by them are reflected correctly in /packages
-        image.assertNode("/packages/java.gus/mod.name");
+        assertNode(image, "/packages/java.gus/mod.name");
 
         // None of this appears in the non-preview image.
-        TestImage noPreview = new TestImage(false, files, preview);
-        assertFalse(noPreview.get("/modules/mod.name/java/foo/bar").isPresent());
-        assertFalse(noPreview.get("/modules/mod.name/java/gus").isPresent());
-        assertFalse(noPreview.get("/packages/java.gus/mod.name").isPresent());
+        NewImage noPreview = new NewImage(provider, false);
+        assertFalse(noPreview.findNode("/modules/mod.name/java/foo/bar").isPresent());
+        assertFalse(noPreview.findNode("/modules/mod.name/java/gus").isPresent());
+        assertFalse(noPreview.findNode("/packages/java.gus/mod.name").isPresent());
     }
 
     @Test
-    public void testTopLevelNonDirectory() {
-        Set<String> files = Set.of(
-                "mod.name/java/foo/First",
-                "not.a.directory",
-                "mod.name/java/foo/Second");
-        Set<String> preview = Set.of(
-                "normal.file",
-                "mod.name/java/bar/Other");
-        TestImage image = new TestImage(true, files, preview);
+    public void topLevelNonDirectory() {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.name/java/foo/First",
+                        "not.a.directory",
+                        "mod.name/java/foo/Second"),
+                Set.of(
+                        "normal.file",
+                        "mod.name/java/bar/Other"));
+        NewImage image = new NewImage(provider, true);
 
         // Top level non-directory files can exist (they probably shouldn't IRL),
         // but they are not implied to be module names.
-        assertFalse(image.assertFirstLookup("/modules/not.a.directory").isDirectory());
-        assertFalse(image.assertFirstLookup("/modules/normal.file").isDirectory());
+        assertFalse(provider.assertFirstLookup(image, "/modules/not.a.directory").isDirectory());
+        assertFalse(provider.assertFirstLookup(image, "/modules/normal.file").isDirectory());
 
-        Node packages = image.assertNode("/packages");
-        Node pkgJava = image.assertNode("/packages/java");
-        Node pkgFoo = image.assertNode("/packages/java.foo");
-        Node pkgBar = image.assertNode("/packages/java.bar");
+        Node packages = assertNode(image, "/packages");
+        Node pkgJava = assertNode(image, "/packages/java");
+        Node pkgFoo = assertNode(image, "/packages/java.foo");
+        Node pkgBar = assertNode(image, "/packages/java.bar");
         assertEquals(asList(pkgJava, pkgBar, pkgFoo), packages.getChildren());
     }
 
     @Test
-    public void testBadPaths() {
-        Set<String> files = Set.of(
-                "mod.name/java/foo/First",
-                "mod.name/java/foo/Second");
-        TestImage image = new TestImage(false, files, Set.of());
+    public void packageLinks() {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.one/java/foo/Foo.class",
+                        "mod.two/java/bar/Bar.class"),
+                Set.of(
+                        "mod.preview/java/foo/preview/Preview.class"));
+        NewImage image = new NewImage(provider, true);
+        Node pkgDir = assertNode(image, "/packages/java.foo");
+        assertTrue(pkgDir.isDirectory());
+        List<Node> children = pkgDir.getChildren();
+        assertTrue(children.stream().allMatch(Node::isLink), "Package directory should contain only links");
+        assertEquals(
+                Set.of(assertNode(image, "/modules/mod.one"), assertNode(image, "/modules/mod.preview")),
+                children.stream().map(n -> n.resolveLink(false)).collect(Collectors.toSet()));
 
-        // Test good paths first to prove something is working!
-        List<String> goodPaths = asList(
-                "",
-                "/modules",
-                "/modules/mod.name",
-                "/modules/mod.name/java",
-                "/modules/mod.name/java/foo",
-                "/modules/mod.name/java/foo/First",
-                "/packages",
-                "/packages/java.foo",
-                "/packages/java.foo/mod.name");
-        for (String path : goodPaths) {
-            assertTrue(image.get(path).isPresent(), "Good path should be present: " + path);
-        }
 
-        // None of these should result in an exception (users are allowed to ask for anything).
-        List<String> badPaths = asList(
-                // Always invalid paths.
-                ".", "..", "//",
-                // Bad /modules paths.
-                "/modules/",
-                "/modules/.",
-                "/modules//",
-                "/modules/mod..name",
-                "/modules/.mod.name",
-                "/modules/mod.name.",
-                // Missing /modules paths.
-                "/modules/not.here",
-                "/modules/mod.name/java/not/here",
-                // Bad /packages paths.
-                "/packages/",
-                "/packages/.",
-                "/packages//",
-                "/packages/java..foo",
-                "/packages/.java.foo",
-                "/packages/java.foo.",
-                // Missing /packages paths.
-                "/packages/not.here",
-                "/packages/java.foo/missing.link",
-                // Extended non-directory paths.
-                "/modules/mod.name/java/foo/First/xxx",
-                "/packages/java.foo/mod.name/xxx");
-        for (String path : badPaths) {
-            assertFalse(image.get(path).isPresent(), "Bad path should not be present: " + path);
-        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "",
+            "/modules",
+            "/modules/mod.name",
+            "/modules/mod.name/java",
+            "/modules/mod.name/java/foo",
+            "/modules/mod.name/java/foo/First",
+            "/packages",
+            "/packages/java.foo",
+            "/packages/java.foo/mod.name"})
+    public void goodPaths(String path) {
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.name/java/foo/First",
+                        "mod.name/java/foo/Second"),
+                Set.of());
+        NewImage image = new NewImage(provider, false);
+        assertTrue(image.findNode(path).isPresent(), "Good path should be present: " + path);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            // Always invalid paths.
+            ".", "..", "//",
+            // Bad /modules paths.
+            "/modules/",
+            "/modules/.",
+            "/modules//",
+            "/modules/mod..name",
+            "/modules/.mod.name",
+            "/modules/mod.name.",
+            // Missing /modules paths.
+            "/modules/not.here",
+            "/modules/mod.name/java/not/here",
+            // Bad /packages paths.
+            "/packages/",
+            "/packages/.",
+            "/packages//",
+            "/packages/java..foo",
+            "/packages/.java.foo",
+            "/packages/java.foo.",
+            // Missing /packages paths.
+            "/packages/not.here",
+            "/packages/java.foo/missing.link",
+            // Extended non-directory paths.
+            "/modules/mod.name/java/foo/First/xxx",
+            "/packages/java.foo/mod.name/xxx"})
+    public void badPaths(String path) {
+        // Same provider and image as above.
+        TestProvider provider = new TestProvider(
+                Set.of(
+                        "mod.name/java/foo/First",
+                        "mod.name/java/foo/Second"),
+                Set.of());
+        NewImage image = new NewImage(provider, false);
+        assertFalse(image.findNode(path).isPresent(), "Bad path should not be present: " + path);
     }
 
     // ---- Static test helper methods ----
+
+    /**
+     * Asserts the given module node exists (not checking whether it existed before or not).
+     *
+     * @param path module path string (must start with {@code "/module"}).
+     */
+    static Node assertNode(NewImage image, String path) {
+        Optional<Node> node = image.findNode(path);
+        assertTrue(node.isPresent(), "Missing node: " + path);
+        return node.get();
+    }
 
     static void assertContent(String expected, Node node) {
         assertFalse(node.isDirectory());
@@ -268,20 +314,17 @@ public class NewImageTest {
 
     // ---- Fake image implementation ----
 
-    static class TestImage extends NewImage {
+    static class TestProvider implements NewImage.ResourceProvider {
         private final Map<String, Boolean> previewMap = new LinkedHashMap<>();
         private final Map<String, Boolean> fileMap = new LinkedHashMap<>();
         private final Set<String> allModuleNames;
-        private final Set<String> allPackageNames;
         // Log of created resources (by path string). Useful to demonstrate lazy creation.
         private final Set<String> creationLog = new LinkedHashSet<>();
 
-        protected TestImage(boolean isPreviewMode, Set<String> resourceFiles, Set<String> previewFiles) {
-            super(isPreviewMode);
+        TestProvider(Set<String> resourceFiles, Set<String> previewFiles) {
             fillMap(this.fileMap, resourceFiles);
             fillMap(this.previewMap, previewFiles);
-            this.allModuleNames = Collections.unmodifiableSet(getModuleNames());
-            this.allPackageNames = Collections.unmodifiableSet(getPackageNames());
+            allModuleNames = Collections.unmodifiableSet(findAllModuleNames());
         }
 
         // ---- Test helper methods for common assertions ----
@@ -291,23 +334,12 @@ public class NewImageTest {
          *
          * @param path module path string (must start with {@code "/module"}).
          */
-        Node assertFirstLookup(String path) {
+        Node assertFirstLookup(NewImage image, String path) {
             ensureModulePath(path, "Can only assert first lookup for module resources");
             assertNotLogged(path);
-            Node node = assertNode(path);
+            Node node = assertNode(image, path);
             assertLogged(path);
             return node;
-        }
-
-        /**
-         * Asserts the given module node exists (not checking whether it existed before or not)..
-         *
-         * @param path module path string (must start with {@code "/module"}).
-         */
-        Node assertNode(String path) {
-            Optional<Node> node = get(path);
-            assertTrue(node.isPresent(), "Missing node: " + path);
-            return node.get();
         }
 
         /**
@@ -345,8 +377,22 @@ public class NewImageTest {
         // Fills the given map with files and directories implied by the given file list.
         private static void fillMap(Map<String, Boolean> map, Set<String> files) {
             assertTrue(files.stream().allMatch(p -> !p.isEmpty() && !p.startsWith("/") && !p.endsWith("/") && !p.contains("//")));
-            files.stream().flatMap(TestImage::parentDirs).forEach(d -> map.put(d, true));
+            files.stream().flatMap(TestProvider::parentDirs).forEach(d -> map.put(d, true));
             files.forEach(f -> map.put(f, false));
+        }
+
+        private Set<String> findAllModuleNames() {
+            Set<String> moduleNames = new TreeSet<>();
+            BiConsumer<String, Boolean> addModuleName = (p, isDir) -> {
+                if (isDir && !p.contains("/")) {
+                    moduleNames.add(p);
+                }
+            };
+            // In the real image, the module name encloses any preview files, so
+            // the total set of module names *always* includes preview-only modules.
+            this.fileMap.forEach(addModuleName);
+            this.previewMap.forEach(addModuleName);
+            return moduleNames;
         }
 
         // Streams the parent directories of the given path (e.g. "a/b/c" -> ["a/b", "a"]).
@@ -358,21 +404,68 @@ public class NewImageTest {
                     .skip(1);
         }
 
-        // Determines all possible module names based on the top level /modules/xxx directories.
-        private Set<String> getModuleNames() {
-            Set<String> moduleNames = new TreeSet<>();
-            BiConsumer<String, Boolean> addModuleName = (p, isDir) -> {
-                if (isDir && !p.contains("/")) {
-                    moduleNames.add(p);
-                }
-            };
-            this.fileMap.forEach(addModuleName);
-            this.previewMap.forEach(addModuleName);
-            return moduleNames;
+        // ---- Test image logic ----
+
+        // Create a new resource node (in the "/modules" hierarchy) and log it.
+        // Since this is the only place where callbacks to create/cache nodes are
+        // made, we can be sure we log new nodes exactly when they are created.
+        private Node logNewResource(NodeFactory factory, String path, boolean isDir, boolean isPreview) {
+            Node newNode = isDir
+                    ? factory.newResourceDirectory(path)
+                    : factory.newResource(path, () -> (path + (isPreview ? "*" : "")).getBytes(UTF_8));
+            creationLog.add(newNode.toString());
+            return newNode;
         }
 
-        // Determines all possible package names based on /modules/*/xxx/yyy directories.
-        private Set<String> getPackageNames() {
+        @Override
+        public Optional<Node> getResource(String resourcePath, NodeFactory factory, boolean isPreview) {
+            if (resourcePath.isEmpty()) {
+                // "Root" directory always exists for path "".
+                return Optional.of(logNewResource(factory, resourcePath, true, isPreview));
+            }
+            Boolean isDir = (isPreview ? previewMap : fileMap).get(resourcePath);
+            return isDir != null
+                    ? Optional.of(logNewResource(factory, resourcePath, isDir, isPreview))
+                    : Optional.empty();
+        }
+
+        @Override
+        public void forEachChildOf(NodeFactory factory, String dirPath, boolean isPreview, Consumer<Node> action) {
+            // Resource root directory prefix is just "", not "/".
+            String dirPrefix = dirPath.isEmpty() ? dirPath : (dirPath + "/");
+            forEachChild(
+                    dirPrefix,
+                    isPreview,
+                    (name, isDir) -> action.accept(logNewResource(factory, dirPrefix + name, isDir, isPreview)));
+        }
+
+        public boolean packageExists(String moduleName, String packageName, boolean withPreviewPackages) {
+            String modPath = moduleName + "/" + packageName.replace('.', '/');
+            return fileMap.get(modPath) == TRUE
+                    || (withPreviewPackages && previewMap.get(modPath) == TRUE);
+        }
+
+        @Override
+        public Set<String> getModulesForPackage(String packageName, boolean withPreviewNames) {
+            Set<String> modules = new TreeSet<>();
+            String packagePath = "/" + packageName.replace('.', '/');
+            allModuleNames.forEach(moduleName -> {
+                String modPath = moduleName + packagePath;
+                if (fileMap.get(modPath) == TRUE
+                        || (withPreviewNames && previewMap.get(modPath) == TRUE)) {
+                    modules.add(moduleName);
+                }
+            });
+            return modules;
+        }
+
+        @Override
+        public Set<String> getAllModuleNames() {
+            return allModuleNames;
+        }
+
+        @Override
+        public Set<String> getPackageNames(boolean withPreviewNames) {
             Set<String> packageNames = new TreeSet<>();
             BiConsumer<String, Boolean> addPackageName = (p, isDir) -> {
                 if (isDir) {
@@ -384,53 +477,10 @@ public class NewImageTest {
                 }
             };
             this.fileMap.forEach(addPackageName);
-            this.previewMap.forEach(addPackageName);
-            return packageNames;
-        }
-
-        // ---- Test image logic ----
-
-        // Create a new resource node (in the "/modules" hierarchy) and log it.
-        // Since this is the only place where callbacks to create/cache nodes are
-        // made, we can be sure we log new nodes exactly when they are created.
-        private Node logNewResource(String path, boolean isDir, boolean isPreview) {
-            Node newNode = isDir
-                    ? newResourceDirectory(path)
-                    : newResource(path, () -> (path + (isPreview ? "*" : "")).getBytes(UTF_8));
-            creationLog.add(newNode.toString());
-            return newNode;
-        }
-
-        @Override
-        protected Optional<Node> getResource(String resourcePath, boolean preview) {
-            if (resourcePath.isEmpty()) {
-                // "Root" directory always exists for path "".
-                return Optional.of(logNewResource(resourcePath, true, preview));
+            if (withPreviewNames) {
+                this.previewMap.forEach(addPackageName);
             }
-            Boolean isDir = (preview ? previewMap : fileMap).get(resourcePath);
-            return isDir != null
-                    ? Optional.of(logNewResource(resourcePath, isDir, preview))
-                    : Optional.empty();
-        }
-
-        @Override
-        protected void forEachChildOf(String dirPath, boolean preview, Consumer<Node> action) {
-            // Resource root directory prefix is just "", not "/".
-            String dirPrefix = dirPath.isEmpty() ? dirPath : (dirPath + "/");
-            forEachChild(
-                    dirPrefix,
-                    preview,
-                    (name, isDir) -> action.accept(logNewResource(dirPrefix + name, isDir, preview)));
-        }
-
-        @Override
-        protected Set<String> getAllModuleNames() {
-            return allModuleNames;
-        }
-
-        @Override
-        protected Set<String> getAllPackageNames() {
-            return allPackageNames;
+            return packageNames;
         }
 
         // Process an action for each immediate child of the given directory prefix,
@@ -448,9 +498,7 @@ public class NewImageTest {
 
         @Override
         public String toString() {
-            return String.format(
-                    "Files: %s\nPreview: %s\nModules: %s\n, Packages: %s\nLog: %s",
-                    fileMap, previewMap, allModuleNames, allPackageNames, creationLog);
+            return String.format("Files: %s\nPreview: %s\nLog: %s", fileMap, previewMap, creationLog);
         }
     }
 }

@@ -334,10 +334,18 @@ public final class ImageReader implements AutoCloseable {
             // /packages dir
             packagesDir = newDirectory(root, "/packages");
             packagesDir.setIsPackagesDir();
+            visitLocation(findLocation("/packages"), (childloc) -> {
+                newDirectory(packagesDir, childloc.getFullName());
+            });
+            packagesDir.setCompleted(true);
 
             // /modules dir
             modulesDir = newDirectory(root, "/modules");
             modulesDir.setIsModulesDir();
+            visitLocation(findLocation("/modules"), (childloc) -> {
+                newDirectory(modulesDir, childloc.getFullName());
+            });
+            modulesDir.setCompleted(true);
 
             root.setCompleted(true);
             return rootDir = root;

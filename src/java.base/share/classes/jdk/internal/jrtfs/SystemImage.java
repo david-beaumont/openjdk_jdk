@@ -47,8 +47,8 @@ import jdk.internal.jimage.ImageReader.Node;
  * but also compiled and delivered as part of the jrtfs.jar to support access
  * to the jimage file provided by the shipped JDK by tools running on JDK 8.
  */
-@SuppressWarnings({ "removal", "suppression"} )
-abstract class SystemImage {
+@SuppressWarnings({"removal", "suppression"})
+public abstract class SystemImage {
 
     abstract Node findNode(String path) throws IOException;
     abstract byte[] getResource(Node node) throws IOException;
@@ -81,7 +81,7 @@ abstract class SystemImage {
 
     static final String RUNTIME_HOME;
     // "modules" jimage file Path
-    static final Path moduleImageFile;
+    public static final Path moduleImageFile;
     // "modules" jimage exists or not?
     static final boolean modulesImageExists;
     // <JAVA_HOME>/modules directory Path

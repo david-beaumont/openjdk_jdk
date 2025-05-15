@@ -326,7 +326,7 @@ public class BasicImageReader implements AutoCloseable {
                         .toArray(String[]::new);
     }
 
-    ImageLocation getLocation(int offset) {
+    protected ImageLocation getLocation(int offset) {
         return ImageLocation.readFrom(this, offset);
     }
 
